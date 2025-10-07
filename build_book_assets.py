@@ -547,13 +547,13 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument(
         "--name-style",
         choices=["long", "short", "compact"],
-        default="long",
+        default="compact",
         help="long: Section + Chapter; short: Chapter only; compact: drop 'Section …' and chapter numbers, join with '_'",
     )
     ap.add_argument(
         "--max-base-chars",
         type=int,
-        default=120,
+        default=90,
         help="Max characters for chapter base name (folder + file base). Reduce on Windows",
     )
     ap.add_argument(
@@ -565,7 +565,7 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument(
         "--max-label-chars",
         type=int,
-        default=48,
+        default=28,
         help="Max characters for the labels segment in image filename",
     )
     return ap.parse_args()
@@ -586,8 +586,9 @@ def resolve_default_pdf() -> Optional[Path]:
 
 def main() -> None:
     args = parse_args()
+    # Default to verbose logs for clear progress without extra flags
     logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO,
+        level=logging.INFO if not args.verbose else logging.DEBUG,
         format="[%(levelname)s] %(message)s",
     )
     src = Path(args.pdf) if args.pdf else resolve_default_pdf()
