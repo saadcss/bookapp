@@ -3,6 +3,8 @@ import csv
 import re
 import logging
 import shutil
+import hashlib
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -17,6 +19,24 @@ def sanitize(name: str) -> str:
     name = re.sub(r'[\\/:*?"<>|]', ' ', name)
     name = re.sub(r"\s+", " ", name).strip()
     return name
+
+
+def truncate_with_hash(s: str, max_len: int) -> str:
+    """Truncate a string to max_len, appending an 8-char hash for uniqueness."""
+    if max_len <= 0 or len(s) <= max_len:
+        return s
+    h = hashlib.sha1(s.encode("utf-8")).hexdigest()[:8]
+    keep = max(8, max_len - 9)
+    return f"{s[:keep]}_{h}"
+
+SECTION_PREFIX_RX = re.compile(r"^\s*Section\s+[IVXLCDM]+\.\s*", re.IGNORECASE)
+CHAPTER_NUMBER_PREFIX_RX = re.compile(r"^\s*\d+\.?\s*")
+
+def compact_part(text: str) -> str:
+    """Remove leading numbering and 'Section …' prefix for compact names."""
+    t = SECTION_PREFIX_RX.sub("", text or "")
+    t = CHAPTER_NUMBER_PREFIX_RX.sub("", t)
+    return sanitize(t)
 
 
 def load_reader(pdf_path: Path) -> PyPDF2.PdfReader:
@@ -104,7 +124,11 @@ class ChapterInfo:
 
 
 def split_into_chapters(
-    src_pdf: Path, out_root: Path, mode: str = "auto"
+    src_pdf: Path,
+    out_root: Path,
+    mode: str = "auto",
+    name_style: str = "long",
+    max_base_chars: int = 120,
 ) -> List[ChapterInfo]:
     logger = logging.getLogger(__name__)
     logger.info("Splitting into chapters from bookmarks …")
@@ -133,8 +157,18 @@ def split_into_chapters(
     logger.info("Detected %d chapters", len(chapters))
     for idx, (chap, (s, e)) in enumerate(zip(chapters, ranges), start=1):
         sect_title = section_for(chap.page_index) or ""
-        composed = f"{sect_title} - {chap.title}" if sect_title else chap.title
+        if name_style == "short" and sect_title:
+            composed = chap.title
+        elif name_style == "compact":
+            # Drop 'Section …' and chapter numeric prefixes
+            sect_comp = compact_part(sect_title) if sect_title else ""
+            chap_comp = compact_part(chap.title)
+            composed = f"{chap_comp}" if not sect_comp else f"{sect_comp}_{chap_comp}"
+        else:
+            composed = f"{sect_title} - {chap.title}" if sect_title else chap.title
         fname_base = f"{idx:0{digits}d} - {sanitize(composed)}"
+        if max_base_chars:
+            fname_base = truncate_with_hash(fname_base, max_base_chars)
         pdf_name = f"{fname_base}.pdf"
 
         writer = PyPDF2.PdfWriter()
@@ -271,6 +305,8 @@ def extract_figures_and_tables(
     base_name: str,
     zoom: float = 3.0,
     image_quality: int = 90,
+    max_labels: int = 1,
+    max_label_chars: int = 48,
 ) -> ExtractSummary:
     logger = logging.getLogger(__name__)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -306,15 +342,17 @@ def extract_figures_and_tables(
             # if page had markers but we failed to extract labels, still capture
             content_items = ["content"]
 
+        # Limit number/length of labels for Windows path safety
+        if max_labels > 0:
+            content_items = content_items[:max_labels]
+        label = "_".join(content_items) if content_items else "content"
+        if max_label_chars:
+            label = truncate_with_hash(label, max_label_chars)
+
         # Render page to image
         mat = fitz.Matrix(zoom, zoom)
         pix = page.get_pixmap(matrix=mat, alpha=False)
         img_bytes = pix.tobytes("jpeg", jpg_quality=image_quality)
-
-        # Compose filename — include first few labels to keep names manageable
-        label = "_".join(content_items[:3])
-        if len(content_items) > 3:
-            label += "_plus"
 
         img_name = f"{base_name}_page{page_idx + 1:03d}_{label}.jpg"
         img_path = out_dir / img_name
@@ -354,13 +392,23 @@ def build_book_assets(
     out_root: Path,
     mode: str = "auto",
     keep_raw: bool = False,
+    name_style: str = "long",
+    max_base_chars: int = 120,
+    max_labels: int = 1,
+    max_label_chars: int = 48,
 ) -> None:
     logger = logging.getLogger(__name__)
     out_root.mkdir(parents=True, exist_ok=True)
 
     # Step 1: Split book into chapter PDFs with sequential prefixes
     raw_chapters_dir = out_root / "_chapters_raw"
-    chapters = split_into_chapters(src_pdf, out_root=raw_chapters_dir, mode=mode)
+    chapters = split_into_chapters(
+        src_pdf,
+        out_root=raw_chapters_dir,
+        mode=mode,
+        name_style=name_style,
+        max_base_chars=max_base_chars,
+    )
 
     # Step 2: Per chapter — create output folder, strip references, then extract figures/tables
     manifest_rows = []
@@ -395,6 +443,8 @@ def build_book_assets(
                 pdf_path=cleaned_pdf,
                 out_dir=chapter_folder,
                 base_name=ch.base_name,
+                max_labels=max_labels,
+                max_label_chars=max_label_chars,
             )
             if extract_summary.total_pages_with_content == 0:
                 chapters_with_no_figs += 1
@@ -494,6 +544,30 @@ def parse_args() -> argparse.Namespace:
     )
     ap.add_argument("-v", "--verbose", action="store_true", help="Enable verbose logging")
     ap.add_argument("-k", "--keep-raw", action="store_true", help="Keep intermediate _chapters_raw PDFs (default: delete)")
+    ap.add_argument(
+        "--name-style",
+        choices=["long", "short", "compact"],
+        default="long",
+        help="long: Section + Chapter; short: Chapter only; compact: drop 'Section …' and chapter numbers, join with '_'",
+    )
+    ap.add_argument(
+        "--max-base-chars",
+        type=int,
+        default=120,
+        help="Max characters for chapter base name (folder + file base). Reduce on Windows",
+    )
+    ap.add_argument(
+        "--max-labels",
+        type=int,
+        default=1,
+        help="Max number of figure/table labels to include in image filename",
+    )
+    ap.add_argument(
+        "--max-label-chars",
+        type=int,
+        default=48,
+        help="Max characters for the labels segment in image filename",
+    )
     return ap.parse_args()
 
 
@@ -523,7 +597,16 @@ def main() -> None:
         )
 
     out_root = Path(args.out)
-    build_book_assets(src_pdf=src, out_root=out_root, mode=args.mode, keep_raw=bool(args.keep_raw))
+    build_book_assets(
+        src_pdf=src,
+        out_root=out_root,
+        mode=args.mode,
+        keep_raw=bool(args.keep_raw),
+        name_style=args.name_style,
+        max_base_chars=int(args.max_base_chars),
+        max_labels=int(args.max_labels),
+        max_label_chars=int(args.max_label_chars),
+    )
 
 
 if __name__ == "__main__":
