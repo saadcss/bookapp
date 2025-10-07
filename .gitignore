@@ -1,6 +1,17 @@
 # Ignore all PDF files
 *.pdf
 *.PDF
-\n+# Ignore generated/extracted folders
+
+# Ignore generated/extracted folders
+output/
+out_seq/
 out_no_refs/
 extracted_all_files/
+extracted_output/
+extracted_content/
+
+# Python/OS noise
+__pycache__/
+*.py[cod]
+*$py.class
+.DS_Store

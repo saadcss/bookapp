@@ -1,6 +1,7 @@
 import re
 import csv
 import argparse
+import logging
 from pathlib import Path
 import PyPDF2
 
@@ -51,10 +52,13 @@ def first_references_page(reader: PyPDF2.PdfReader) -> int | None:
     return None
 
 def strip_references_from_pdf(src_pdf: Path, dst_pdf: Path) -> tuple[int, list[int]]:
+    logger = logging.getLogger(__name__)
+    logger.debug(f"Opening PDF for reference stripping: {src_pdf}")
     reader = PyPDF2.PdfReader(str(src_pdf))
     writer = PyPDF2.PdfWriter()
     n = len(reader.pages)
 
+    logger.debug(f"Pages detected: {n}")
     start_ref_idx = first_references_page(reader)  # 0-based
     last_keep = n - 1 if start_ref_idx is None else max(0, start_ref_idx - 1)
 
@@ -75,6 +79,14 @@ def strip_references_from_pdf(src_pdf: Path, dst_pdf: Path) -> tuple[int, list[i
         removed_pages_1based = []
         kept_count = n
 
+    logger.debug(
+        "Reference detection: start_ref_idx=%s, last_keep=%s, kept=%s, removed=%s",
+        start_ref_idx,
+        last_keep,
+        kept_count,
+        len(removed_pages_1based),
+    )
+
     dst_pdf.parent.mkdir(parents=True, exist_ok=True)
     with open(dst_pdf, "wb") as f:
         writer.write(f)
@@ -87,32 +99,54 @@ def main():
     )
     ap.add_argument("in_dir", help="Folder with original chapter PDFs (e.g., out/)")
     ap.add_argument("-o", "--out_dir", default="out_no_refs", help="Destination folder (default: out_no_refs)")
+    ap.add_argument("-v", "--verbose", action="store_true", help="Enable verbose logging")
     args = ap.parse_args()
+
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="[%(levelname)s] %(message)s",
+    )
+    logger = logging.getLogger(__name__)
 
     in_dir = Path(args.in_dir).expanduser().resolve()
     out_dir = Path(args.out_dir).expanduser().resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    logger.info("Starting reference stripping")
+    logger.info("Input folder: %s", in_dir)
+    logger.info("Output folder: %s", out_dir)
+
     pdfs = sorted([p for p in in_dir.iterdir() if p.suffix.lower() == ".pdf"])
     if not pdfs:
-        print(f"No PDFs found in {in_dir}")
+        logger.warning("No PDFs found in %s", in_dir)
         return
 
+    total = len(pdfs)
+    ok = 0
+    no_refs = 0
+    failed = 0
+
     manifest_rows = []
-    for pdf in pdfs:
+    for i, pdf in enumerate(pdfs, 1):
+        logger.info("(%d/%d) Processing: %s", i, total, pdf.name)
         dst = out_dir / pdf.name
         try:
             kept_pages, removed_pages = strip_references_from_pdf(pdf, dst)
-            status = f"removed {len(removed_pages)} page(s)" if removed_pages else "no references found"
-            print(f"[OK] {pdf.name} → {dst.name}  ({status})")
+            if removed_pages:
+                logger.info("→ Wrote %s (removed %d page(s))", dst.name, len(removed_pages))
+            else:
+                logger.info("→ Wrote %s (no references detected)", dst.name)
+                no_refs += 1
 
             manifest_rows.append({
                 "filename": pdf.name,
                 "removed_pages_1based": ",".join(map(str, removed_pages)) if removed_pages else "",
                 "kept_pages_count": kept_pages,
             })
+            ok += 1
         except Exception as e:
-            print(f"[ERR] {pdf.name}: {e}")
+            failed += 1
+            logger.error("Failed: %s (%s)", pdf.name, e)
             manifest_rows.append({
                 "filename": pdf.name,
                 "removed_pages_1based": "ERROR",
@@ -125,7 +159,9 @@ def main():
         w = csv.DictWriter(f, fieldnames=["filename", "removed_pages_1based", "kept_pages_count"])
         w.writeheader()
         w.writerows(manifest_rows)
-    print(f"\nDone. Cleaned files + manifest saved to: {out_dir}")
+    logger.info("\nSummary: processed=%d, success=%d, no_refs=%d, failed=%d", total, ok, no_refs, failed)
+    logger.info("Manifest saved: %s", mf)
+    logger.info("Done. Cleaned files saved to: %s", out_dir)
 
 if __name__ == "__main__":
     main()
