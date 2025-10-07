@@ -1,0 +1,6 @@
+# Ignore all PDF files
+*.pdf
+*.PDF
+\n+# Ignore generated/extracted folders
+out_no_refs/
+extracted_all_files/
